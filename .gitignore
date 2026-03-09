@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+
+# Training data (large, regenerable)
+*.npz
+transient_data.npz
+checkpoint_*.npz
+
+# Model checkpoints (large, retrainable)
+checkpoints/
+checkpoints_backup/
+exported_models/
+
+# Logs
+*.log
+training.log
+generator.log
+
+# Benchmark results (regenerable)
+benchmark_results.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Visualizations — keep only curated samples in repo
+# (GIFs are large; PNGs are small and useful for README)
+visualizations/*.gif
