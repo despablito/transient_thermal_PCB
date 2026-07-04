@@ -1,13 +1,17 @@
 """
 Physics-Informed Validation Suite
 =================================
-Comprehensive stress tests for the Transient Thermal Neural Operator.
+Qualitative stress tests for the transient thermal surrogate.
 
 Tests:
 1. Step Response (Heating dynamics with proper volumetric power)
 2. Zero-Power Cooling (Newton's Law of Cooling)
 3. Heat-then-Cool (Step up + step down)
-4. Long-Horizon Stability (Sinusoidal power drive cycle)
+4. Long-Horizon Stability (Sinusoidal power drive cycle, 300 steps)
+
+SCOPE: these are sanity/stability checks (right direction, no oscillation,
+no blow-up over a long autoregressive horizon). They do NOT measure accuracy
+against the FDM solver — for that, use benchmark_eval.py --fresh-data.
 
 All inputs use CORRECT normalization and spatial patterns matching training data.
 """
@@ -31,12 +35,15 @@ LX, LY = 10e-3, 10e-3    # [m] domain size
 
 
 def gaussian_pattern(peak_val: float, H=32, W=32, device=DEVICE):
-    """Create Gaussian hotspot pattern matching training data spatial distribution."""
+    """
+    Create Gaussian hotspot pattern matching training data spatial distribution.
+
+    In normalized coords [-1, 1] one unit = Lx/2 = 5mm, so exp(-r²/0.5) has
+    σ_norm = 0.5 → σ_phys = 2.5mm — exactly the training HOTSPOT_SIGMA.
+    """
     y = torch.linspace(-1, 1, H, device=device)
     x = torch.linspace(-1, 1, W, device=device)
     yy, xx = torch.meshgrid(y, x, indexing='ij')
-    sigma_norm = 2 * (HOTSPOT_SIGMA / LX) ** 2
-    gauss = torch.exp(-(xx**2 + yy**2) / (2 * sigma_norm * (H/2)**2))
     gauss = torch.exp(-(xx**2 + yy**2) / 0.5)
     return (peak_val * gauss).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
 

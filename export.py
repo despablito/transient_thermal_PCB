@@ -61,15 +61,15 @@ class ONNXExporter:
         self.model.eval()
     
     def create_dummy_inputs(self, batch_size: int = 1) -> Tuple[torch.Tensor, ...]:
-        """Create dummy inputs for tracing."""
+        """Create dummy inputs for tracing (NORMALIZED ranges, like deployment)."""
         H, W = self.input_shape
-        
-        P_t = torch.randn(batch_size, 1, H, W)
-        P_t_prev = torch.randn(batch_size, 1, H, W)
-        T_t_prev = torch.randn(batch_size, 1, H, W) * 50 + 50  # Realistic T range
-        T_amb = torch.full((batch_size, 1, H, W), 25.0)
-        h = torch.full((batch_size, 1, H, W), 500.0)
-        
+
+        P_t = torch.rand(batch_size, 1, H, W)                    # P/P_scale ∈ [0, 1]
+        P_t_prev = torch.rand(batch_size, 1, H, W)
+        T_t_prev = torch.rand(batch_size, 1, H, W) * 0.6 + 0.1   # T/T_scale ≈ 30-210°C
+        T_amb = torch.full((batch_size, 1, H, W), 35.0 / 300.0)  # T_amb/T_scale
+        h = torch.full((batch_size, 1, H, W), 15000.0 / 20000.0) # h/h_scale
+
         return (P_t, P_t_prev, T_t_prev, T_amb, h)
     
     def export(self, output_path: str, batch_size: int = 1,
@@ -169,59 +169,71 @@ class INT8Quantizer:
                                   ) -> List[Dict[str, torch.Tensor]]:
         """
         Generate representative calibration dataset.
-        
+
         If calibration_data_path is provided, samples from real data.
         Otherwise, generates synthetic representative inputs.
+
+        IMPORTANT: the model consumes NORMALIZED inputs (P/P_scale, T/T_scale,
+        h/h_scale — see TrainingConfig). Calibration must use the same
+        normalized ranges, otherwise INT8 quantization ranges are computed for
+        inputs the model never sees and the quantized model is useless.
         """
         H, W = input_shape
         calibration_set = []
-        
+
+        # Normalization scales — must match training (TrainingConfig)
+        if TrainingConfig is not None:
+            cfg = TrainingConfig()
+            P_SC, T_SC, H_SC = cfg.P_scale, cfg.T_scale, cfg.h_scale
+        else:
+            P_SC, T_SC, H_SC = 1e10, 300.0, 20000.0
+
         if self.calibration_data_path and Path(self.calibration_data_path).exists():
-            # Load real data
+            # Load real data (raw physical units) and normalize like training
             data = np.load(self.calibration_data_path)
             T_maps = data['T_maps']
             P_maps = data['P_maps']
             h_values = data['h_values']
             T_amb_values = data['T_amb_values']
-            
+
             n_seq, n_frames = T_maps.shape[:2]
-            
+
             for _ in range(n_samples):
                 seq_idx = np.random.randint(0, n_seq)
                 frame_idx = np.random.randint(1, n_frames)
-                
-                P_t = torch.from_numpy(P_maps[seq_idx, frame_idx]).unsqueeze(0).unsqueeze(0).float()
-                P_t_prev = torch.from_numpy(P_maps[seq_idx, frame_idx - 1]).unsqueeze(0).unsqueeze(0).float()
-                T_t_prev = torch.from_numpy(T_maps[seq_idx, frame_idx - 1]).unsqueeze(0).unsqueeze(0).float()
-                T_amb = torch.full((1, 1, H, W), T_amb_values[seq_idx])
-                h = torch.full((1, 1, H, W), h_values[seq_idx])
-                
+
+                P_t = torch.from_numpy(P_maps[seq_idx, frame_idx]).unsqueeze(0).unsqueeze(0).float() / P_SC
+                P_t_prev = torch.from_numpy(P_maps[seq_idx, frame_idx - 1]).unsqueeze(0).unsqueeze(0).float() / P_SC
+                T_t_prev = torch.from_numpy(T_maps[seq_idx, frame_idx - 1]).unsqueeze(0).unsqueeze(0).float() / T_SC
+                T_amb = torch.full((1, 1, H, W), float(T_amb_values[seq_idx])) / T_SC
+                h = torch.full((1, 1, H, W), float(h_values[seq_idx])) / H_SC
+
                 calibration_set.append({
                     'P_t': P_t, 'P_t_prev': P_t_prev,
                     'T_t_prev': T_t_prev, 'T_amb': T_amb, 'h': h
                 })
         else:
-            # Generate synthetic calibration data
+            # Synthetic calibration data — physical ranges matching the
+            # training distribution, then normalized like training.
             print("Using synthetic calibration data")
             for _ in range(n_samples):
-                # Representative ranges based on physics
-                P_scale = np.random.uniform(0, 1e6)  # 0 to 1 MW/m³
-                T_base = np.random.uniform(25, 125)  # Junction temp range
-                h_val = np.random.uniform(50, 2000)   # Convection range
-                T_amb_val = np.random.uniform(25, 85) # Ambient range
-                
-                P_t = torch.randn(1, 1, H, W).abs() * P_scale
-                P_t_prev = torch.randn(1, 1, H, W).abs() * P_scale * 0.8
-                T_t_prev = torch.randn(1, 1, H, W) * 10 + T_base
-                T_amb = torch.full((1, 1, H, W), T_amb_val)
-                h = torch.full((1, 1, H, W), h_val)
-                
+                q_peak = np.random.uniform(0, 1.2e10)        # W/m³, volumetric peak (training range)
+                T_base = np.random.uniform(25, 300)          # °C junction range
+                h_val = np.random.uniform(5000, 30000)       # W/(m²K), training range
+                T_amb_val = np.random.uniform(25, 60)        # °C, training range
+
+                P_t = (torch.randn(1, 1, H, W).abs() * q_peak) / P_SC
+                P_t_prev = (torch.randn(1, 1, H, W).abs() * q_peak * 0.8) / P_SC
+                T_t_prev = (torch.randn(1, 1, H, W) * 10 + T_base) / T_SC
+                T_amb = torch.full((1, 1, H, W), T_amb_val) / T_SC
+                h = torch.full((1, 1, H, W), h_val) / H_SC
+
                 calibration_set.append({
                     'P_t': P_t, 'P_t_prev': P_t_prev,
                     'T_t_prev': T_t_prev, 'T_amb': T_amb, 'h': h
                 })
-        
-        print(f"Generated {len(calibration_set)} calibration samples")
+
+        print(f"Generated {len(calibration_set)} calibration samples (normalized)")
         return calibration_set
     
     def quantize_pytorch(self, output_path: str) -> nn.Module:
@@ -445,13 +457,16 @@ class InferenceBenchmark:
         print(f"P95:    {results['p95_ms']:.3f} ms")
         print(f"P99:    {results['p99_ms']:.3f} ms")
         
-        # STM32 estimate (ARM Cortex-M7 is ~10x slower than desktop CPU)
-        stm32_estimate = results['mean_ms'] * 10
-        print(f"\n=== STM32 Estimate (10x factor) ===")
-        print(f"Estimated inference time: {stm32_estimate:.1f} ms")
-        
-        target_met = stm32_estimate < 10
-        print(f"Target (<10ms): {'✓ PASS' if target_met else '✗ FAIL'}")
+        # VERY rough STM32 extrapolation. A Cortex-M7 is typically 50-200x
+        # slower than a desktop CPU for convnets (clock, SIMD width, memory
+        # bandwidth), so this is an OPTIMISTIC lower bound, not a measurement.
+        # The <10ms target can only be confirmed on hardware (X-CUBE-AI /
+        # CMSIS-NN benchmark on the actual MCU).
+        stm32_low = results['mean_ms'] * 10
+        stm32_high = results['mean_ms'] * 100
+        print(f"\n=== STM32 Extrapolation (NOT a measurement) ===")
+        print(f"Estimated range: {stm32_low:.1f} - {stm32_high:.1f} ms (10-100x desktop factor)")
+        print(f"Target <10ms: unverified until profiled on hardware")
         
         return results
 

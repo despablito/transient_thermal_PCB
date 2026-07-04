@@ -1,8 +1,24 @@
 """
-Benchmark: 50 losowych sekwencji testowych
-==========================================
-Porównanie wyjścia FDM (benchmark) z predykcjami wytrenowanej sieci.
+Benchmark: FDM vs sieć neuronowa
+================================
+Porównanie wyjścia FDM (ground truth) z predykcjami wytrenowanej sieci.
 Raport: MAE, RMSE, Max Error + przedziały ufności 95%.
+
+Dwa tryby:
+
+1. --fresh-data N  (ZALECANY — prawdziwy hold-out)
+   Generuje N ZUPEŁNIE NOWYCH sekwencji solverem FDM z ziarnami spoza
+   zakresu treningowego (trening: seed 42 + idx, czyli 42-1041; tu domyślnie
+   10000+). Ewaluacja na pełnym horyzoncie 100 klatek, start z T_amb.
+   Ten tryb daje uczciwą miarę generalizacji niezależnie od tego, jakim
+   podziałem trenowano checkpoint.
+
+2. tryb domyślny (split train/val/test z load_data)
+   Poprawny TYLKO dla checkpointów wytrenowanych po wprowadzeniu
+   seedowanego splitu (TrainingConfig.split_seed). Dla starszych
+   checkpointów podział przy treningu był nieseedowany, więc zbiór
+   "testowy" z re-splitu pokrywa się w ~80% ze zbiorem treningowym
+   i wyniki są zawyżone (data leakage). Używa okien 20 klatek.
 """
 
 import argparse
@@ -19,6 +35,56 @@ from train import TrainingConfig, load_data
 DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
 SEED = 42
 N_SEQUENCES = 50
+FRESH_DATA_SEED = 10000  # poza zakresem ziaren treningowych (42-1041)
+
+
+def generate_fresh_sequences(n_sequences: int, data_seed: int):
+    """
+    Generuje świeże sekwencje FDM (hold-out) tą samą konwencją co trening,
+    ale z ziarnami spoza zakresu treningowego.
+
+    Zwraca listę słowników w formacie zgodnym z ThermalSequenceDataset.__getitem__
+    (pełne 100 klatek, T_initial = T_amb, P_initial = 0).
+    """
+    from data_gen import ThermalProperties, TransientThermalSolver, PowerProfileGenerator
+
+    assert data_seed > 1041 or data_seed < 0, \
+        "data_seed musi być poza zakresem ziaren treningowych (42-1041)"
+
+    props = ThermalProperties()
+    solver = TransientThermalSolver(props)
+    rng = np.random.default_rng(data_seed)
+    n_frames = props.n_frames
+
+    samples = []
+    for i in range(n_sequences):
+        h = rng.uniform(*props.h_range)
+        T_amb = rng.uniform(*props.T_amb_range)
+
+        p_gen = PowerProfileGenerator(props, seed=data_seed + i)
+        P_seq, _ = p_gen.generate_power_sequence(n_frames)
+        Q_func = p_gen.create_power_interpolator(P_seq, props.dt)
+
+        _, T_hist = solver.solve(
+            Q_func, h, T_amb,
+            (0, props.dt * n_frames),
+            np.linspace(0, props.dt * n_frames, n_frames + 1)
+        )
+        T_res = T_hist[1:].astype(np.float32)   # T po każdym kroku (jak w treningu)
+        P_res = P_seq.astype(np.float32)
+
+        samples.append({
+            'T_seq': torch.from_numpy(T_res).unsqueeze(1).float(),          # [T,1,H,W]
+            'P_seq': torch.from_numpy(P_res).unsqueeze(1).float(),          # [T,1,H,W]
+            'T_initial': torch.full((1, props.ny, props.nx), T_amb).float(),
+            'P_initial': torch.zeros((1, props.ny, props.nx)).float(),
+            'h': torch.tensor(h).float(),
+            'T_amb': torch.tensor(T_amb).float(),
+        })
+        print(f"  Wygenerowano sekwencję hold-out {i+1}/{n_sequences} "
+              f"(h={h:.0f}, T_amb={T_amb:.1f}°C, T_max={T_res.max():.1f}°C)")
+
+    return samples
 
 
 def set_seed(seed: int):
@@ -102,12 +168,20 @@ def confidence_interval(values, confidence=0.95):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Benchmark na 50 losowych sekwencjach testowych')
+    parser = argparse.ArgumentParser(description='Benchmark FDM vs sieć neuronowa')
     parser.add_argument('--checkpoint', default='checkpoints/best_model.pth', help='Ścieżka do modelu')
     parser.add_argument('--n', type=int, default=N_SEQUENCES, help='Liczba sekwencji (domyślnie 50)')
     parser.add_argument('--seed', type=int, default=SEED, help='Ziarno losowości')
     parser.add_argument('--out', default='benchmark_results.json', help='Plik JSON z wynikami')
     parser.add_argument('--no-plot', action='store_true', help='Bez generowania wykresu')
+    parser.add_argument('--fresh-data', action='store_true',
+                        help='ZALECANE: hold-out — generuje świeże sekwencje FDM spoza treningu '
+                             '(pełny horyzont 100 klatek) zamiast re-splitu zbioru treningowego')
+    parser.add_argument('--data-seed', type=int, default=FRESH_DATA_SEED,
+                        help=f'Ziarno generatora świeżych sekwencji (domyślnie {FRESH_DATA_SEED}, '
+                             f'poza zakresem treningowym 42-1041)')
+    parser.add_argument('--physics-baseline', action='store_true',
+                        help='Ewaluacja modelu BEZ wag (sama fizyka implicit Euler, bez korekty sieci)')
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -117,32 +191,53 @@ def main():
     config = TrainingConfig()
     print("Ładowanie modelu...")
     model = create_model(verify_params=False).to(DEVICE)
-    cp = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
-    model.load_state_dict(cp['model_state_dict'])
+    if args.physics_baseline:
+        epoch = 'physics-baseline (bez treningu)'
+        print("  Model NIEwytrenowany — czysty baseline fizyczny (implicit Euler)")
+    else:
+        cp = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+        model.load_state_dict(cp['model_state_dict'])
+        epoch = cp.get('epoch', '?')
+        print(f"  Model załadowany (epoch {epoch})")
     model.eval()
-    epoch = cp.get('epoch', '?')
-    print(f"  Model załadowany (epoch {epoch})")
 
-    print("Ładowanie danych (podział train/val/test)...")
-    _, _, test_loader = load_data(config, logger)
-    dataset = test_loader.dataset
-    n_seq = dataset.n_sequences
-    n_eval = min(args.n, n_seq)
-    rng = np.random.default_rng(args.seed)
-    seq_indices = rng.choice(n_seq, size=n_eval, replace=False)
-    starts = dataset.starts_per_seq
-
-    print(f"  Zbiór testowy: {n_seq} sekwencji. Ewaluacja: {n_eval} losowych sekwencji.\n")
     results_per_seq = []
 
-    for i, seq_i in enumerate(seq_indices):
-        idx = int(seq_i * starts)
-        data = dataset[idx]
-        res = evaluate_sequence(model, data, config, DEVICE)
-        res['sequence_id'] = int(seq_i)
-        results_per_seq.append(res)
-        if (i + 1) % 10 == 0 or i == 0:
-            print(f"  Sekwencja {i+1}/{n_eval} (id={seq_i}): MAE_os={res['mae_one_step']:.2f}°C, MAE_ar={res['mae_autoreg']:.2f}°C")
+    if args.fresh_data:
+        print(f"Generowanie {args.n} świeżych sekwencji hold-out (seed={args.data_seed})...")
+        samples = generate_fresh_sequences(args.n, args.data_seed)
+        n_eval = len(samples)
+        print(f"\nEwaluacja na pełnym horyzoncie {samples[0]['T_seq'].shape[0]} klatek:\n")
+        for i, data in enumerate(samples):
+            res = evaluate_sequence(model, data, config, DEVICE)
+            res['sequence_id'] = int(args.data_seed + i)
+            results_per_seq.append(res)
+            if (i + 1) % 10 == 0 or i == 0:
+                print(f"  Sekwencja {i+1}/{n_eval}: MAE_os={res['mae_one_step']:.2f}°C, MAE_ar={res['mae_autoreg']:.2f}°C")
+    else:
+        print("UWAGA: tryb split-based. Wynik jest miarodajny tylko dla checkpointów")
+        print("       wytrenowanych z seedowanym splitem (TrainingConfig.split_seed).")
+        print("       Dla starszych checkpointów użyj --fresh-data (prawdziwy hold-out).")
+        print("Ładowanie danych (podział train/val/test)...")
+        _, _, test_loader = load_data(config, logger)
+        dataset = test_loader.dataset
+        n_seq = dataset.n_sequences
+        n_eval = min(args.n, n_seq)
+        rng = np.random.default_rng(args.seed)
+        seq_indices = rng.choice(n_seq, size=n_eval, replace=False)
+        starts = dataset.starts_per_seq
+
+        print(f"  Zbiór testowy: {n_seq} sekwencji. Ewaluacja: {n_eval} losowych sekwencji "
+              f"(okna {dataset.sequence_length} klatek).\n")
+
+        for i, seq_i in enumerate(seq_indices):
+            idx = int(seq_i * starts)
+            data = dataset[idx]
+            res = evaluate_sequence(model, data, config, DEVICE)
+            res['sequence_id'] = int(seq_i)
+            results_per_seq.append(res)
+            if (i + 1) % 10 == 0 or i == 0:
+                print(f"  Sekwencja {i+1}/{n_eval} (id={seq_i}): MAE_os={res['mae_one_step']:.2f}°C, MAE_ar={res['mae_autoreg']:.2f}°C")
 
     # Agregacja
     mae_os = np.array([r['mae_one_step'] for r in results_per_seq])
@@ -161,9 +256,12 @@ def main():
     mean_max_ar, margin_max_ar, lo_max_ar, hi_max_ar = confidence_interval(max_ar, ci)
 
     summary = {
+        'mode': 'fresh_holdout' if args.fresh_data else 'split_based',
+        'data_seed': args.data_seed if args.fresh_data else None,
+        'horizon_frames': 100 if args.fresh_data else config.sequence_length,
         'n_sequences': n_eval,
         'seed': args.seed,
-        'checkpoint': args.checkpoint,
+        'checkpoint': args.checkpoint if not args.physics_baseline else 'physics-baseline',
         'epoch': epoch,
         'confidence': ci,
         'one_step': {
@@ -212,7 +310,8 @@ def main():
             bp['boxes'][0].set_facecolor('lightgreen')
             bp['boxes'][1].set_facecolor('lightcoral')
             ax.set_ylabel('MAE [°C]')
-            ax.set_title('Rozkład MAE (50 sekwencji)')
+            mode_lbl = 'hold-out, pełny horyzont' if args.fresh_data else 'split, okna 20 klatek'
+            ax.set_title(f'Rozkład MAE ({n_eval} sekwencji, {mode_lbl})')
             ax.grid(True, alpha=0.3)
             # Słupek średniej z 95% CI
             ax = axes[1]
@@ -227,7 +326,8 @@ def main():
             ax.set_title(f'Średni MAE z 95% przedziałem ufności (n={n_eval})')
             ax.grid(True, alpha=0.3, axis='y')
             plt.tight_layout()
-            plot_path = Path('visualizations/benchmark_50seq.png')
+            plot_name = 'benchmark_holdout.png' if args.fresh_data else 'benchmark_50seq.png'
+            plot_path = Path('visualizations') / plot_name
             plot_path.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
             plt.close()
