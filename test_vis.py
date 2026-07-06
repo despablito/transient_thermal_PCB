@@ -219,7 +219,7 @@ def visualize_diagnostic(model, dataset, idx=0, save_path='visualizations/diagno
              fontfamily='monospace', va='top',
              bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
     
-    fig.suptitle(f'Thermal Neural Operator — Diagnostic Report (Sequence #{idx})',
+    fig.suptitle(f'Thermal Neural Surrogate — Diagnostic Report (Sequence #{idx})',
                  fontsize=14, fontweight='bold')
     
     plt.savefig(save_path, dpi=150, bbox_inches='tight')

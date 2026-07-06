@@ -26,43 +26,53 @@ Instead of a purely data-driven model, we combine an **unconditionally stable ph
 
 ## Results
 
-### Agreement with the FDM solver
+All numbers below are **out-of-sample** and fully reproducible: the trained
+weights ship with the repo (`weights/best_model.pth`, 250 KB), the train/val/
+test split is seeded, and the hold-out benchmark generates fresh FDM
+sequences from generator seeds outside the training range.
 
-Original benchmark of the trained model (50 sequences, 20-frame windows, 95% CI):
+### Hold-out benchmark (the headline)
 
-| Metric | One-Step | Autoregressive |
-|--------|----------|----------------|
-| MAE | 9.19 °C (CI: 6.67–11.71) | 8.56 °C (CI: 6.37–10.76) |
-| RMSE | 13.15 °C | 12.26 °C |
-| Max | 57.66 °C | 56.10 °C |
+50 freshly generated FDM sequences (never seen in any form during training),
+**full 100-frame autoregressive horizon**, cold start from T_amb, 95% CI:
 
-> **Evaluation-protocol caveat (honest V&V note).** These numbers come from a
-> benchmark run whose train/val/test split was re-drawn with an *unseeded*
-> permutation, so the evaluation sequences largely overlap the training set.
-> Treat them as **in-distribution agreement with the FDM solver**, not as a
-> held-out generalization measure. The split is now seeded
-> (`TrainingConfig.split_seed`), and the repo ships a true hold-out benchmark
-> that generates fresh FDM sequences from seeds outside the training range:
->
-> ```bash
-> python benchmark_eval.py --fresh-data --n 50   # honest out-of-sample eval
-> ```
->
-> The trained checkpoint is not stored in the repo (see Quick Start), so
-> reproducing the trained-model numbers requires retraining (~7 h on M2).
+```bash
+python benchmark_eval.py --fresh-data --n 50 --checkpoint weights/best_model.pth
+```
 
-**Reproducible reference point** — the untrained physics baseline (implicit
-Euler only, zero neural correction) on the hold-out benchmark (50 fresh
-sequences, seeds outside the training range, full 100-frame autoregressive
-horizon; `python benchmark_eval.py --fresh-data --physics-baseline --n 50`):
+| Metric | One-Step | Autoregressive (100 steps) |
+|--------|----------|----------------------------|
+| MAE | 11.57 °C (CI: 10.09–13.05) | 12.48 °C (CI: 9.91–15.04) |
+| RMSE | 20.41 °C | 22.68 °C |
 
-| Metric | One-Step | Autoregressive |
-|--------|----------|----------------|
+Error accumulation over a 100-step autoregressive rollout is modest:
+**+0.9 °C MAE vs one-step** — the physics residual keeps the rollout anchored.
+
+![Hold-out benchmark](visualizations/benchmark_holdout.png)
+
+**Physics baseline** (untrained model = implicit Euler only, zero neural
+correction; same protocol, `--physics-baseline`):
+
+| Metric | One-Step | Autoregressive (100 steps) |
+|--------|----------|----------------------------|
 | MAE | 15.58 °C (CI: 13.47–17.69) | 21.30 °C (CI: 17.33–25.27) |
 | RMSE | 26.88 °C | 35.08 °C |
 
-This is the floor the neural correction improves upon, and it is fully
-reproducible without any checkpoint (no training required).
+The learned correction cuts autoregressive MAE by **~41%** (21.30 → 12.48 °C)
+relative to the pure-physics floor.
+
+### Test-split benchmark
+
+50 sequences from the seeded test split (`split_seed=42`, never used in
+training), 20-frame windows: one-step MAE 12.10 °C (CI: 8.99–15.22),
+autoregressive MAE 12.02 °C (CI: 8.44–15.60) — consistent with the hold-out
+numbers.
+
+> **Honest-V&V note:** earlier versions of this README reported MAE
+> ≈ 8.6–9.2 °C. Those numbers came from a benchmark whose train/test split
+> was re-drawn with an unseeded permutation, so its "test" set overlapped the
+> training set. They were retired and replaced by the leak-proof protocol
+> above (seeded split + fresh-sequence hold-out).
 
 ### Physics sanity checks (4/4 PASS)
 
@@ -141,7 +151,8 @@ retraining:
 - **Regime:** Fully autoregressive from epoch 1 (no teacher forcing)
 - **Optimizer:** AdamW, cosine LR schedule (3e-4 → 3e-6)
 - **Gradient clipping:** 0.5
-- **Hardware:** Apple M2 (MPS backend), ~14 min/epoch
+- **Hardware:** Apple Silicon (MPS backend), ~13–15 min/epoch; 30 epochs ≈ 6.5 h
+- **Shipped checkpoint:** best epoch 28 (val loss 0.0067) → `weights/best_model.pth`
 
 ![Learning Curve](visualizations/learning_curve.png)
 
@@ -152,26 +163,28 @@ retraining:
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Generate data (~30 min on M2)
-python data_gen.py
+# 2. Reproduce the headline numbers with the SHIPPED weights (no training):
+python benchmark_eval.py --fresh-data --n 50 --checkpoint weights/best_model.pth
 
-# 3. Train (~7h on M2)
-python train.py --fresh
-
-# 4. Validate physics (stability sanity checks)
-python validate_physics.py
-
-# 5. Diagnostic visualization
-python test_vis.py --checkpoint checkpoints/best_model.pth
-
-# 6. Benchmark — hold-out (recommended): fresh FDM sequences, full horizon
-python benchmark_eval.py --fresh-data --n 50
-
-#    Reproducible physics-only floor (no checkpoint needed):
+#    Physics-only floor (no checkpoint at all):
 python benchmark_eval.py --fresh-data --physics-baseline --n 50
 
+# --- Full reproduction from scratch ---
+
+# 3. Generate data (~30 min)
+python data_gen.py
+
+# 4. Train (~6.5h on Apple Silicon)
+python train.py --fresh
+
+# 5. Validate physics (stability sanity checks)
+python validate_physics.py --checkpoint weights/best_model.pth
+
+# 6. Diagnostic visualization
+python test_vis.py --checkpoint weights/best_model.pth
+
 # 7. Export for STM32
-python export.py
+python export.py --checkpoint weights/best_model.pth
 ```
 
 ## Project Structure
@@ -186,8 +199,11 @@ python export.py
 ├── test_vis.py            # 9-panel diagnostic visualization
 ├── requirements.txt
 ├── LICENSE
-└── visualizations/        # Generated plots
+├── weights/
+│   └── best_model.pth     # Trained weights (epoch 28, 250 KB) — reproduce results without training
+└── visualizations/        # Generated plots (all from the shipped checkpoint's run)
     ├── learning_curve.png
+    ├── benchmark_holdout.png
     ├── benchmark_50seq.png
     ├── diagnostic_plot.png
     └── physics_validation.png
