@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SiC MOSFET Thermal Surrogate — live in your browser</title>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+<style>
+  :root {
+    --bg: #0e1420; --panel: #141c2e; --edge: #2a3550; --fg: #e8edf4;
+    --dim: #9fb0c8; --teal: #4dd8e6; --gold: #f2b134; --red: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 13.5px; margin-bottom: 20px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 14px; }
+  .map-panel { flex: 0 0 auto; }
+  .ctrl-panel { flex: 1 1 300px; min-width: 280px; }
+  canvas { display: block; border-radius: 6px; }
+  #heat { image-rendering: pixelated; width: 384px; height: 384px; background: #000; }
+  #chart { width: 100%; height: 170px; margin-top: 14px; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+  .row label { flex: 0 0 150px; color: var(--dim); font-size: 13px; }
+  .row input[type=range] { flex: 1; accent-color: var(--teal); }
+  .row .val { flex: 0 0 90px; text-align: right; font-variant-numeric: tabular-nums; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+  button { background: #1c2740; color: var(--fg); border: 1px solid var(--edge);
+           border-radius: 7px; padding: 7px 13px; font-size: 13.5px; cursor: pointer; }
+  button:hover { border-color: var(--teal); }
+  button.active { background: var(--teal); color: #06222a; border-color: var(--teal); font-weight: 600; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  .stat { background: #101828; border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; }
+  .stat .k { color: var(--dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .v { font-size: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 12px; color: var(--dim); font-weight: 400; }
+  #hotv { color: var(--red); } #spsv { color: var(--teal); }
+  .note { color: var(--dim); font-size: 12.5px; margin-top: 16px; border-top: 1px solid var(--edge); padding-top: 12px; }
+  .note a { color: var(--teal); text-decoration: none; }
+  #loading { color: var(--gold); }
+  .cbar { width: 384px; height: 12px; border-radius: 4px; margin-top: 8px; }
+  .cbar-lbl { display: flex; justify-content: space-between; width: 384px; color: var(--dim); font-size: 11.5px; }
+  @media (max-width: 860px) { #heat, .cbar, .cbar-lbl { width: 100%; } #heat { height: auto; aspect-ratio: 1; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SiC MOSFET junction temperature — neural surrogate, live in your browser</h1>
+  <div class="sub">
+    48,106-parameter physics-augmented U-Net (341 KB ONNX) running fully client-side —
+    the same autoregressive rollout as on an STM32-class target. No server, no GPU.
+    <span id="loading">Loading model…</span>
+  </div>
+
+  <div class="grid">
+    <div class="panel map-panel">
+      <canvas id="heat" width="32" height="32"></canvas>
+      <canvas id="cbar" class="cbar" width="256" height="1"></canvas>
+      <div class="cbar-lbl"><span>25 °C</span><span>junction temperature</span><span>260 °C</span></div>
+    </div>
+
+    <div class="panel ctrl-panel">
+      <div class="btns">
+        <button id="mode-manual" class="active">Manual</button>
+        <button id="mode-drive">Drive cycle</button>
+        <button id="mode-pulse">Pulse train</button>
+        <span style="flex:1"></span>
+        <button id="speed">⏱ Real-time (10 Hz)</button>
+        <button id="reset">Reset</button>
+      </div>
+      <div class="row"><label>Power (nominal)</label>
+        <input id="p" type="range" min="0" max="150" step="1" value="60"><span class="val" id="pv">60 W</span></div>
+      <div class="row"><label>Cooling h</label>
+        <input id="h" type="range" min="5000" max="30000" step="500" value="15000"><span class="val" id="hv">15000</span></div>
+      <div class="row"><label>Ambient T</label>
+        <input id="ta" type="range" min="25" max="60" step="1" value="35"><span class="val" id="tav">35 °C</span></div>
+
+      <div class="stats">
+        <div class="stat"><div class="k">Hotspot</div><div class="v" id="hotv">— <small>°C</small></div></div>
+        <div class="stat"><div class="k">Mean</div><div class="v" id="meanv">— <small>°C</small></div></div>
+        <div class="stat"><div class="k">Inference</div><div class="v" id="spsv">— <small>steps/s</small></div></div>
+      </div>
+      <canvas id="chart" width="600" height="170"></canvas>
+    </div>
+  </div>
+
+  <div class="note">
+    Each animation step is one full forward pass of the network predicting ΔT for the next 0.1 s from
+    (P<sub>t</sub>, P<sub>t−1</sub>, T<sub>t−1</sub>, T<sub>amb</sub>, h) — the model runs on its own predictions
+    indefinitely, anchored by an implicit-Euler physics residual.
+    Hold-out accuracy vs the FDM solver: MAE 12.5 °C over 100-step rollouts (95% CI 9.9–15.0).
+    Trained on synthetic 2D FDM data — a methodology demo, not a production T<sub>j</sub> estimator; see the
+    <a href="https://github.com/despablito/transient_thermal_PCB">repo</a> for the honest V&amp;V story, limitations and reproduction.
+  </div>
+</div>
+
+<script>
+"use strict";
+const N = 32, T_SCALE = 300, P_SCALE = 1e10, H_SCALE = 20000, DT = 0.1;
+const SIGMA = 2.5e-3, TH = 0.5e-3, VOL = Math.PI * SIGMA * SIGMA * TH; // W -> peak q_vol convention (see data_gen.py)
+const TMIN = 25, TMAX = 260;
+
+// Gaussian hotspot pattern, normalized coords [-1,1], sigma_norm^2 = 0.25
+const GAUSS = new Float32Array(N * N);
+for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+  const y = -1 + 2 * i / (N - 1), x = -1 + 2 * j / (N - 1);
+  GAUSS[i * N + j] = Math.exp(-(x * x + y * y) / 0.5);
+}
+
+// Turbo colormap (polynomial approximation)
+function turbo(x) {
+  x = Math.min(1, Math.max(0, x));
+  const r = 0.13572138 + x * (4.61539260 + x * (-42.66032258 + x * (132.13108234 + x * (-152.94239396 + x * 59.28637943))));
+  const g = 0.09140261 + x * (2.19418839 + x * (4.84296658 + x * (-14.18503333 + x * (4.27729857 + x * 2.82956604))));
+  const b = 0.10667330 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))));
+  return [255 * Math.min(1, Math.max(0, r)), 255 * Math.min(1, Math.max(0, g)), 255 * Math.min(1, Math.max(0, b))];
+}
+
+// State (normalized units, like training)
+let Tmap = new Float32Array(N * N), Pmap = new Float32Array(N * N), PmapPrev = new Float32Array(N * N);
+let hVal = 15000, tAmb = 35, pWatts = 60;
+let mode = 'manual', realtime = true, session = null, running = false;
+let simTime = 0, segEnd = 0, segPower = 0;
+let history = [];            // {t, hot, p}
+let stepTimes = [];          // for steps/s
+
+function resetState() {
+  Tmap.fill(tAmb / T_SCALE); Pmap.fill(0); PmapPrev.fill(0);
+  simTime = 0; segEnd = 0; history = [];
+}
+
+function setPower(watts) {
+  PmapPrev.set(Pmap);
+  const peak = watts / VOL / P_SCALE; // nominal W -> normalized peak volumetric density
+  for (let k = 0; k < N * N; k++) Pmap[k] = peak * GAUSS[k];
+}
+
+// Drive cycle: period-averaged SiC losses (I_peak, V_dc, f_out drawn like training ranges)
+function drivePower() {
+  if (simTime >= segEnd) {
+    segEnd = simTime + 1 + 2 * Math.random();
+    if (Math.random() < 0.25) segPower = 0;
+    else {
+      const I = 20 + 55 * Math.random(), V = 400 + 400 * Math.random();
+      segPower = 0.5 * I * I * 0.030 + 20e3 * V * (2 * I / Math.PI) * 1e-8;
+    }
+  }
+  return segPower;
+}
+
+async function step() {
+  if (mode === 'drive') pWatts = drivePower();
+  else if (mode === 'pulse') pWatts = (Math.floor(simTime) % 2 === 0) ? 60 : 0;
+  else pWatts = +document.getElementById('p').value;
+  document.getElementById('p').value = pWatts;
+  document.getElementById('pv').textContent = pWatts.toFixed(0) + ' W';
+  setPower(pWatts);
+
+  const mk = a => new ort.Tensor('float32', a, [1, 1, N, N]);
+  const tAmbArr = new Float32Array(N * N).fill(tAmb / T_SCALE);
+  const hArr = new Float32Array(N * N).fill(hVal / H_SCALE);
+  const out = await session.run({
+    P_t: mk(Pmap), P_t_prev: mk(PmapPrev), T_t_prev: mk(Tmap), T_amb: mk(tAmbArr), h: mk(hArr),
+  });
+  const dT = out.delta_T.data;
+  let hot = -1e9, sum = 0;
+  for (let k = 0; k < N * N; k++) {
+    Tmap[k] += dT[k];
+    const t = Tmap[k] * T_SCALE;
+    if (t > hot) hot = t; sum += t;
+  }
+  simTime += DT;
+  history.push({ t: simTime, hot, p: pWatts });
+  if (history.length > 300) history.shift();
+  stepTimes.push(performance.now());
+  while (stepTimes.length > 40) stepTimes.shift();
+  return { hot, mean: sum / (N * N) };
+}
+
+// Rendering
+const heatCtx = document.getElementById('heat').getContext('2d');
+const heatImg = heatCtx.createImageData(N, N);
+function drawHeat() {
+  const d = heatImg.data;
+  for (let k = 0; k < N * N; k++) {
+    const [r, g, b] = turbo((Tmap[k] * T_SCALE - TMIN) / (TMAX - TMIN));
+    d[4 * k] = r; d[4 * k + 1] = g; d[4 * k + 2] = b; d[4 * k + 3] = 255;
+  }
+  heatCtx.putImageData(heatImg, 0, 0);
+}
+const cbarCtx = document.getElementById('cbar').getContext('2d');
+(function drawCbar() {
+  const img = cbarCtx.createImageData(256, 1);
+  for (let i = 0; i < 256; i++) {
+    const [r, g, b] = turbo(i / 255);
+    img.data[4 * i] = r; img.data[4 * i + 1] = g; img.data[4 * i + 2] = b; img.data[4 * i + 3] = 255;
+  }
+  cbarCtx.putImageData(img, 0, 0);
+})();
+
+const chart = document.getElementById('chart'), cc = chart.getContext('2d');
+function drawChart() {
+  const W = chart.width = chart.clientWidth * 2, H = chart.height = 340;
+  cc.clearRect(0, 0, W, H);
+  if (history.length < 2) return;
+  const t0 = history[0].t, t1 = history[history.length - 1].t;
+  const xs = t => 40 + (W - 50) * (t - t0) / Math.max(1e-6, t1 - t0);
+  const yT = v => H - 24 - (H - 40) * (v - TMIN) / (TMAX - TMIN);
+  const yP = v => H - 24 - (H - 40) * v / 160;
+  cc.strokeStyle = '#2a3550'; cc.lineWidth = 1;
+  [100, 175, 250].forEach(v => { cc.beginPath(); cc.moveTo(40, yT(v)); cc.lineTo(W - 8, yT(v)); cc.stroke();
+    cc.fillStyle = '#9fb0c8'; cc.font = '20px sans-serif'; cc.fillText(v + '°', 2, yT(v) + 6); });
+  cc.strokeStyle = '#f2b134'; cc.globalAlpha = 0.55; cc.lineWidth = 2; cc.beginPath();
+  history.forEach((s, i) => i ? cc.lineTo(xs(s.t), yP(s.p)) : cc.moveTo(xs(s.t), yP(s.p))); cc.stroke();
+  cc.globalAlpha = 1; cc.strokeStyle = '#ff5c5c'; cc.lineWidth = 3; cc.beginPath();
+  history.forEach((s, i) => i ? cc.lineTo(xs(s.t), yT(s.hot)) : cc.moveTo(xs(s.t), yT(s.hot))); cc.stroke();
+  cc.fillStyle = '#ff5c5c'; cc.font = '22px sans-serif'; cc.fillText('hotspot T', 48, 28);
+  cc.fillStyle = '#f2b134'; cc.fillText('power', 170, 28);
+}
+
+function updateStats(r) {
+  document.getElementById('hotv').innerHTML = r.hot.toFixed(1) + ' <small>°C</small>';
+  document.getElementById('meanv').innerHTML = r.mean.toFixed(1) + ' <small>°C</small>';
+  let sps = '—';
+  if (stepTimes.length > 5) {
+    const dt = (stepTimes[stepTimes.length - 1] - stepTimes[0]) / (stepTimes.length - 1);
+    sps = (1000 / dt).toFixed(0);
+  }
+  document.getElementById('spsv').innerHTML = sps + ' <small>steps/s</small>';
+}
+
+async function loop() {
+  if (running) return; running = true;
+  while (session) {
+    const t0 = performance.now();
+    const r = await step();
+    drawHeat(); drawChart(); updateStats(r);
+    const elapsed = performance.now() - t0;
+    if (realtime) await new Promise(res => setTimeout(res, Math.max(0, 100 - elapsed)));
+    else await new Promise(res => setTimeout(res, 0));
+  }
+}
+
+// UI wiring
+const $ = id => document.getElementById(id);
+$('h').oninput = e => { hVal = +e.target.value; $('hv').textContent = hVal; };
+$('ta').oninput = e => { tAmb = +e.target.value; $('tav').textContent = tAmb + ' °C'; };
+$('p').oninput = e => { $('pv').textContent = (+e.target.value).toFixed(0) + ' W'; };
+['manual', 'drive', 'pulse'].forEach(m => {
+  $('mode-' + m).onclick = () => {
+    mode = m; segEnd = 0;
+    ['manual', 'drive', 'pulse'].forEach(x => $('mode-' + x).classList.toggle('active', x === m));
+    $('p').disabled = (m !== 'manual');
+  };
+});
+$('speed').onclick = () => {
+  realtime = !realtime;
+  $('speed').textContent = realtime ? '⏱ Real-time (10 Hz)' : '🚀 Max speed';
+  stepTimes = [];
+};
+$('reset').onclick = resetState;
+
+(async () => {
+  try {
+    ort.env.wasm.numThreads = 1; // GitHub Pages has no cross-origin isolation
+    session = await ort.InferenceSession.create('thermal_model.onnx', { executionProviders: ['wasm'] });
+    resetState();
+    $('loading').textContent = '';
+    loop();
+  } catch (e) {
+    $('loading').textContent = 'Failed to load model: ' + e.message;
+  }
+})();
+</script>
+</body>
+</html>

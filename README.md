@@ -2,6 +2,8 @@
 
 Real-time junction temperature estimation using a **physics-augmented neural surrogate** (U-Net + implicit-Euler residual), designed for deployment on STM32-class microcontrollers.
 
+**[▶ Live demo](https://despablito.github.io/transient_thermal_PCB/)** — the trained surrogate (341 KB ONNX) running fully client-side in your browser: interactive power/cooling controls, autoregressive rollout, ~150 steps/s on a laptop CPU.
+
 ![FDM vs Neural Surrogate](visualizations/fdm_vs_surrogate.gif)
 
 *Hold-out drive cycle (never seen in training), real-time playback: FDM ground truth vs fully autoregressive surrogate rollout (100 steps on its own predictions). Reproduce with `python animate_comparison.py`.*
@@ -202,6 +204,9 @@ python export.py --checkpoint weights/best_model.pth
 ├── export.py              # ONNX export + INT8 quantization (normalized calibration)
 ├── test_vis.py            # 9-panel diagnostic visualization
 ├── animate_comparison.py  # FDM-vs-surrogate animation (README hero GIF)
+├── docs/                  # Browser demo (GitHub Pages): ONNX Runtime Web + 341 KB model
+│   ├── index.html
+│   └── thermal_model.onnx
 ├── requirements.txt
 ├── LICENSE
 ├── weights/
