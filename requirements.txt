@@ -11,7 +11,8 @@ matplotlib>=3.7.0
 
 # Export
 onnx>=1.14.0
-# onnxruntime>=1.15.0  # Optional — needed only for inference benchmarking
+onnxscript>=0.1.0  # Required by torch.onnx.export on torch >= 2.6
+# onnxruntime>=1.15.0  # Optional — needed only for inference benchmarking + INT8 quantization
 
 # Benchmark evaluation
 # (no extra deps beyond scipy + matplotlib)

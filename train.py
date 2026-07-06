@@ -119,6 +119,10 @@ class TrainingConfig:
     data_pattern: str = 'checkpoint_*.npz'
     train_split: float = 0.8
     val_split: float = 0.1
+    # Seed for the train/val/test split. MUST be identical at training and
+    # evaluation time — otherwise the "test" set of a later re-split overlaps
+    # the training set and benchmark numbers are contaminated.
+    split_seed: int = 42
     
     # Optimization
     batch_size: int = 32
@@ -732,7 +736,12 @@ def load_data(config: TrainingConfig, logger: logging.Logger) -> Tuple[DataLoade
     n_sequences = combined_data['T_maps'].shape[0]
     logger.info(f"Using {n_sequences} total sequences from {checkpoint_files[largest_idx]}")
     
-    indices = np.random.permutation(n_sequences)
+    # Deterministic, seeded split — reproducible across train/eval scripts.
+    # (Historical note: before this fix the permutation was unseeded, so a
+    # benchmark run after training re-split the data differently and its
+    # "test" set overlapped the training set.)
+    indices = np.random.default_rng(config.split_seed).permutation(n_sequences)
+    logger.info(f"Train/val/test split seed: {config.split_seed}")
     
     # Split indices
     n_train = int(n_sequences * config.train_split)

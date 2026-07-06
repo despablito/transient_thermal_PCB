@@ -4,10 +4,32 @@ Transient Thermal Data Generator
 2D FDM solver + electro-thermal SiC MOSFET loss model.
 
 Generates training data: 1000 sequences × 100 frames × 32×32 temperature
-and power density maps for the Thermal Neural Operator.
+and power density maps for the thermal surrogate model.
 
 Physics:
     ρCp ∂T/∂t = k∇²T + Q(t) − h(T − T_amb)/L
+
+KNOWN MODELING CONVENTIONS (do not change without retraining the model —
+the network was trained on data produced with exactly these conventions):
+
+1. Power normalization: `calculate_volumetric_power_density` divides by the
+   Gaussian's π·σ² "disk" area, but the actual 2D Gaussian integrates to
+   2π·σ². Net effect: the power injected into the domain is ≈1.85× the
+   nominal P_total from the loss model (2× minus boundary truncation).
+   The dataset is internally self-consistent; only the absolute wattage
+   labels are nominal, not effective.
+
+2. Temporal aliasing: the electrical sine (f_out = 10-100 Hz) is sampled at
+   dt = 0.1 s (Nyquist 5 Hz), so the per-frame loss is an aliased sample of
+   the instantaneous loss curve, not its period average. For f_out near
+   multiples of 5 Hz the sampled power of a segment can be biased anywhere
+   between 0 and 2× the true average. The excitation is therefore best read
+   as a *randomized power profile*, not a literal drive cycle. The physically
+   correct approach (period-averaged losses: P_cond = I_peak²·R/2,
+   P_sw ∝ 2·I_peak/π) requires regenerating data and retraining.
+
+3. One-way electro-thermal coupling: R_ds(on) is a constant R_ds_eff; the
+   temperature feedback T → R_ds(on) (temp_coeff) is NOT applied.
 """
 
 import numpy as np
@@ -70,13 +92,19 @@ class SiCLossModel:
     f_out: float = 50.0           # Motor/Output Frequency [Hz] (10-100Hz range)
     
     # SiC MOSFET Parameters (Typical 1200V/100A die)
-    R_ds_on_base: float = 0.020   # Base on-resistance [Ohm] at 25°C
-    temp_coeff: float = 0.005     # Temperature coefficient [1/°C]
+    # NOTE: coupling is one-way (electrical → thermal). R_ds_on_base and
+    # temp_coeff are declared for reference but NOT used — the simulation
+    # uses a constant R_ds_eff (~hot-die value), with no T → R_ds feedback.
+    R_ds_on_base: float = 0.020   # Base on-resistance [Ohm] at 25°C (unused)
+    temp_coeff: float = 0.005     # Temperature coefficient [1/°C] (unused)
     R_ds_eff: float = 0.030       # Effective R_ds(on) for simulation [Ohm]
-    
-    # Switching energy scaling
-    # E_sw ≈ 15µJ per A·V → scaled empirically for averaged losses
-    E_sw_scale: float = 1.0e-8   # Empirical switching loss factor
+
+    # Empirical switching loss factor: P_sw = f_sw × V_dc × |I| × E_sw_scale.
+    # 1e-8 J/(A·V) = 0.01 µJ per A·V. This is deliberately LOW compared to
+    # datasheet E_on+E_off of a 1200V SiC die (order 5-20 µJ/(A·V) at rated
+    # conditions) — it keeps switching losses a minor contribution vs
+    # conduction losses in this dataset.
+    E_sw_scale: float = 1.0e-8
     
     def current_at_time(self, t: float) -> float:
         """
@@ -266,7 +294,15 @@ class PowerProfileGenerator:
         self.hotspot_sigma = 2.5e-3  # 2.5mm effective hotspot size
         
     def calculate_volumetric_power_density(self, P_watts: float, sigma: float) -> float:
-        """Convert total power [W] to volumetric density [W/m³]."""
+        """
+        Convert total power [W] to PEAK volumetric density [W/m³].
+
+        CONVENTION (kept for compatibility with the trained model — see module
+        docstring, point 1): normalizes by the π·σ² disk area, while the full
+        Gaussian integrates to 2π·σ². The effective power injected into the
+        domain is therefore ≈1.85× P_watts. Fixing this to 2π·σ² requires
+        regenerating the dataset and retraining.
+        """
         area_hotspot = np.pi * sigma ** 2
         volume_hotspot = area_hotspot * self.props.thickness
         return P_watts / volume_hotspot
