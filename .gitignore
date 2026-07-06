@@ -42,3 +42,4 @@ benchmark_results.json
 # Visualizations — keep only curated samples in repo
 # (GIFs are large; PNGs are small and useful for README)
 visualizations/*.gif
+!visualizations/fdm_vs_surrogate.gif

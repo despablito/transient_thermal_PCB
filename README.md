@@ -2,7 +2,9 @@
 
 Real-time junction temperature estimation using a **physics-augmented neural surrogate** (U-Net + implicit-Euler residual), designed for deployment on STM32-class microcontrollers.
 
-![Physics Validation](visualizations/physics_validation.png)
+![FDM vs Neural Surrogate](visualizations/fdm_vs_surrogate.gif)
+
+*Hold-out drive cycle (never seen in training), real-time playback: FDM ground truth vs fully autoregressive surrogate rollout (100 steps on its own predictions). Reproduce with `python animate_comparison.py`.*
 
 ## Problem
 
@@ -85,6 +87,8 @@ model's dynamics, not accuracy against the solver:
 | Cooling Law | P=0, T>T_amb → temperature decays, stays above ambient | ✓ |
 | Heat+Cool | Power on/off → correct direction in both phases | ✓ |
 | Long Horizon | 300-step sinusoidal → no blow-up (>500°C) or negative T | ✓ |
+
+![Physics Validation](visualizations/physics_validation.png)
 
 ### Diagnostic Plot
 
@@ -197,11 +201,13 @@ python export.py --checkpoint weights/best_model.pth
 ├── benchmark_eval.py      # Statistical benchmark (split-based + hold-out --fresh-data)
 ├── export.py              # ONNX export + INT8 quantization (normalized calibration)
 ├── test_vis.py            # 9-panel diagnostic visualization
+├── animate_comparison.py  # FDM-vs-surrogate animation (README hero GIF)
 ├── requirements.txt
 ├── LICENSE
 ├── weights/
 │   └── best_model.pth     # Trained weights (epoch 28, 250 KB) — reproduce results without training
 └── visualizations/        # Generated plots (all from the shipped checkpoint's run)
+    ├── fdm_vs_surrogate.gif
     ├── learning_curve.png
     ├── benchmark_holdout.png
     ├── benchmark_50seq.png
