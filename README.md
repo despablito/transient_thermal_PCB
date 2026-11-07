@@ -1,5 +1,34 @@
 # Transient Thermal Surrogate for SiC MOSFET T_j Estimation
 
+> [!WARNING]
+> **Archived (2026-11) — negative result. Kept public as a V&V record, not as a usable T_j estimator.**
+>
+> A later audit on fresh hold-out sequences found that this surrogate does not justify itself:
+>
+> | | Neural surrogate | Plain implicit-Euler step, same 32×32 grid |
+> |---|---|---|
+> | CPU time per step | 4.8 ms | **0.17 ms** (~28× faster) |
+> | Hotspot (T_j) error | 41.8 °C | **28.9 °C** |
+> | Field-mean error | **13.1 °C** | 15.5 °C |
+>
+> At this resolution the premise "the solver is too slow" does not hold, and the quantity that matters
+> (peak / junction temperature) is estimated better by the simple solver. Further issues:
+>
+> - **Ground-truth bug:** `solve_ivp` (BDF) runs without `max_step`; after an idle start it can step over
+>   later power pulses. ~5 % of sequences have a "ground truth" stuck at ambient despite applied power
+>   (up to ~168 °C off). This is what drives the ~170 °C *Max* error in `benchmark_*_results.json`.
+>   Mean MAE is barely affected (13.2 vs 13.1 °C), but training labels contain the same defect.
+> - **Physics scope:** a bare SiC slab cooled directly (no die-attach / DBC / baseplate stack);
+>   temperatures reach ~450 °C, far beyond SiC's ~175 °C limit.
+> - **Missing baseline:** no comparison against a Foster/Cauer RC network + Kalman filter — the
+>   industry-standard T_j estimator on MCUs.
+>
+> Reproduce (Apple M1 Pro, CPU, 1 thread; seeds ≥20000, outside training):
+> `python audit/solver_vs_surrogate.py . 40` and `python audit/count_skipped_power.py . 60` (3/60 skipped).
+>
+> What remains useful here: the leakage story below (unseeded split → retired numbers), the seeded
+> hold-out protocol, and the in-browser ONNX demo as a deployment exercise.
+
 Real-time junction temperature estimation using a **physics-augmented neural surrogate** (U-Net + implicit-Euler residual), designed for deployment on STM32-class microcontrollers.
 
 **[▶ Live demo](https://despablito.github.io/transient_thermal_PCB/)** — the trained surrogate (341 KB ONNX) running fully client-side in your browser: interactive power/cooling controls, autoregressive rollout, ~150 steps/s on a laptop CPU.
